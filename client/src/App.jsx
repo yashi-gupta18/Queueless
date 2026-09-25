@@ -235,6 +235,16 @@ function ProtectedRoute({ children, roles }) {
   return children
 }
 
+function HomePage() {
+  const { user } = useAuth()
+
+  if (user?.role === 'STAFF' || user?.role === 'ADMIN') {
+    return <Navigate to="/staff" replace />
+  }
+
+  return <CustomerDashboard />
+}
+
 function AppShell({ children }) {
   const { user, logout } = useAuth()
   const location = useLocation()
@@ -242,12 +252,12 @@ function AppShell({ children }) {
   return (
     <div className={`app-shell ${showAdminSidebar ? 'admin-shell' : ''}`}>
       <header className="topbar">
-        <Link className="brand" to="/">
+        <Link className="brand" to={user?.role === 'CUSTOMER' ? '/' : '/staff'}>
           <span className="brand-mark">QL</span>
           <span>QueueLess</span>
         </Link>
         <nav>
-          <Link to="/">Customer</Link>
+          {user?.role === 'CUSTOMER' && <Link to="/">Customer</Link>}
           {(user?.role === 'STAFF' || user?.role === 'ADMIN') && <Link to="/staff">Staff</Link>}
           {user?.role === 'ADMIN' && <Link to="/admin/queues">Admin</Link>}
           <span className="user-chip">{user?.name}</span>
@@ -334,6 +344,7 @@ function QueueStatus({ status, position }) {
 }
 
 function CustomerDashboard() {
+  const { user } = useAuth()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [organizationId, setOrganizationId] = useState('')
@@ -345,7 +356,12 @@ function CustomerDashboard() {
   const organizations = useQuery({ queryKey: ['organizations'], queryFn: () => api.get('/organizations') })
   const branches = useQuery({ queryKey: ['branches'], queryFn: () => api.get('/branches') })
   const services = useQuery({ queryKey: ['services'], queryFn: () => api.get('/services') })
-  const activeEntry = useQuery({ queryKey: ['queues', 'my-active'], queryFn: () => api.get('/queues/my-active'), retry: false })
+  const activeEntry = useQuery({
+    queryKey: ['queues', 'my-active'],
+    queryFn: () => api.get('/queues/my-active'),
+    retry: false,
+    enabled: user?.role === 'CUSTOMER',
+  })
   const queues = useQuery({
     queryKey: ['queues', branchId, serviceId],
     queryFn: () => api.get(`/queues?${new URLSearchParams({ ...(branchId ? { branch: branchId } : {}), ...(serviceId ? { service: serviceId } : {}) })}`),
@@ -479,10 +495,12 @@ function CustomerDashboard() {
           <div className="panel">
             <div className="panel-header">
               <h2>Current queue status</h2>
-              <div className="actions">
-                <Button disabled={!queueId || selectedQueue?.status !== 'OPEN'} onClick={() => setModal('join')}>Join</Button>
-                <Button variant="secondary" disabled={myPosition.data?.entry?.status !== 'WAITING'} onClick={() => setModal('leave')}>Leave</Button>
-              </div>
+              {user?.role === 'CUSTOMER' && (
+                <div className="actions">
+                  <Button disabled={!queueId || selectedQueue?.status !== 'OPEN'} onClick={() => setModal('join')}>Join</Button>
+                  <Button variant="secondary" disabled={myPosition.data?.entry?.status !== 'WAITING'} onClick={() => setModal('leave')}>Leave</Button>
+                </div>
+              )}
             </div>
             <ErrorMessage error={queues.error || queueStatus.error} />
             {socketError && <div className="notice">{socketError}</div>}
@@ -521,6 +539,7 @@ function CustomerDashboard() {
 }
 
 function CustomerQueueStatusPage() {
+  const { user } = useAuth()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { queueId } = useParams()
@@ -572,9 +591,11 @@ function CustomerQueueStatusPage() {
           </div>
           <div className="actions">
             <Button variant="secondary" onClick={() => navigate('/')}>Browse queues</Button>
-            <Button variant="danger" disabled={!entry || entry.status !== 'WAITING' || leaveQueue.isPending} onClick={() => leaveQueue.mutate()}>
-              {leaveQueue.isPending ? 'Leaving...' : 'Leave queue'}
-            </Button>
+            {user?.role === 'CUSTOMER' && (
+              <Button variant="danger" disabled={!entry || entry.status !== 'WAITING' || leaveQueue.isPending} onClick={() => leaveQueue.mutate()}>
+                {leaveQueue.isPending ? 'Leaving...' : 'Leave queue'}
+              </Button>
+            )}
           </div>
         </section>
 
@@ -913,7 +934,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/" element={<ProtectedRoute><CustomerDashboard /></ProtectedRoute>} />
+      <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
       <Route path="/queues/:queueId/status" element={<ProtectedRoute roles={['CUSTOMER']}><CustomerQueueStatusPage /></ProtectedRoute>} />
       <Route path="/staff" element={<ProtectedRoute roles={['STAFF', 'ADMIN']}><StaffDashboard /></ProtectedRoute>} />
       <Route path="/admin/queues" element={<ProtectedRoute roles={['ADMIN']}><AdminQueuePage /></ProtectedRoute>} />
