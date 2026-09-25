@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import http from 'http';
 import app from './app.js';
 import connectDB from './config/db.js';
+import { connectRedis } from './config/redis.js';
 import { initSocket } from './socket/socket.service.js';
 
 dotenv.config();
@@ -9,6 +10,7 @@ dotenv.config();
 const PORT = process.env.PORT || 5000;
 
 await connectDB();
+await connectRedis();
 
 const server = http.createServer(app);
 

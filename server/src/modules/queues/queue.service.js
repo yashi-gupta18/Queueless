@@ -2,6 +2,7 @@ import Branch from '../../models/branch.model.js';
 import Queue from '../../models/queue.model.js';
 import QueueEntry from '../../models/queueEntry.model.js';
 import Service from '../../models/service.model.js';
+import * as redisQueueService from '../../services/redisQueueService.js';
 import { QUEUE_SOCKET_EVENTS } from '../../socket/socket.events.js';
 import { emitQueueEvent, emitQueueUpdated } from '../../socket/socket.service.js';
 import ApiError from '../../utils/apiError.js';
@@ -95,6 +96,12 @@ const assertStaffCanOperateQueue = async (user, queueOrId) => {
 };
 
 const getPeopleAhead = async (entry) => {
+  const redisPosition = await redisQueueService.getQueuePosition(entry.queue, entry.id || entry._id);
+
+  if (redisPosition) {
+    return redisPosition.peopleAhead;
+  }
+
   return QueueEntry.countDocuments({
     queue: entry.queue,
     status: 'WAITING',
@@ -265,6 +272,7 @@ export const openQueue = async (id) => {
   queue.openedAt = new Date();
   queue.closedAt = null;
   await queue.save();
+  await redisQueueService.initializeQueue(queue);
 
   const updatedQueue = await populateQueue(Queue.findById(queue.id));
   emitQueueEvent(QUEUE_SOCKET_EVENTS.OPENED, queue.id, { queue: updatedQueue });
@@ -287,6 +295,7 @@ export const closeQueue = async (id) => {
   queue.status = 'CLOSED';
   queue.closedAt = new Date();
   await queue.save();
+  await redisQueueService.clearQueue(queue.id);
 
   const updatedQueue = await populateQueue(Queue.findById(queue.id));
   emitQueueEvent(QUEUE_SOCKET_EVENTS.CLOSED, queue.id, { queue: updatedQueue });
@@ -364,6 +373,7 @@ export const joinQueue = async (queueId, customerId) => {
   }
 
   const position = await buildPositionPayload(entry, queue);
+  await redisQueueService.addCustomer(entry);
   emitQueueEvent(QUEUE_SOCKET_EVENTS.JOINED, queue.id, { entry: buildEntrySocketPayload(entry) });
   emitQueueUpdated(queue.id, { entry: buildEntrySocketPayload(entry) });
 
@@ -386,6 +396,7 @@ export const leaveQueue = async (queueId, customerId) => {
 
   entry.status = 'CANCELLED';
   await entry.save();
+  await redisQueueService.removeCustomer(queueId, entry.id);
 
   emitQueueEvent(QUEUE_SOCKET_EVENTS.LEFT, queueId, { entry: buildEntrySocketPayload(entry) });
   emitQueueUpdated(queueId, { entry: buildEntrySocketPayload(entry) });
@@ -400,7 +411,7 @@ export const getMyActiveQueueEntry = async (customerId) => {
   }).sort({ joinedAt: -1 });
 
   if (!entry) {
-    throw new ApiError(404, 'Customer has no active queue entry');
+    return { entry: null };
   }
 
   const queue = await getQueueOrThrow(entry.queue);
@@ -427,14 +438,14 @@ export const getMyActiveQueueEntry = async (customerId) => {
 export const getQueueStatus = async (queueId) => {
   const queue = await getQueueOrThrow(queueId);
   const [waitingCount, calledCount, inServiceCount] = await Promise.all([
-    QueueEntry.countDocuments({ queue: queueId, status: 'WAITING' }),
+    redisQueueService.getWaitingCount(queueId),
     QueueEntry.countDocuments({ queue: queueId, status: 'CALLED' }),
     QueueEntry.countDocuments({ queue: queueId, status: 'IN_SERVICE' }),
   ]);
 
   return {
     queue,
-    waitingCount,
+    waitingCount: waitingCount ?? await QueueEntry.countDocuments({ queue: queueId, status: 'WAITING' }),
     calledCount,
     inServiceCount,
     currentToken: queue.currentToken,
@@ -478,25 +489,60 @@ export const callNextCustomer = async (queueId, user) => {
     throw new ApiError(400, 'Queue is closed');
   }
 
-  const activeEntry = await QueueEntry.exists({
-    queue: queueId,
-    status: { $in: STAFF_ACTIVE_STATUSES },
-  });
+  let entry;
+  const redisNext = await redisQueueService.getNextCustomer(queueId);
 
-  if (activeEntry) {
+  if (redisNext?.status === 'ACTIVE') {
     throw new ApiError(409, 'Complete the current customer before calling the next customer.');
   }
 
-  let entry;
+  if (redisNext?.status === 'EMPTY') {
+    await redisQueueService.rebuildQueueFromMongoDB(queue);
+    const rebuiltRedisNext = await redisQueueService.getNextCustomer(queueId);
+
+    if (rebuiltRedisNext?.status === 'ACTIVE') {
+      throw new ApiError(409, 'Complete the current customer before calling the next customer.');
+    }
+
+    if (rebuiltRedisNext?.status === 'OK') {
+      redisNext.status = rebuiltRedisNext.status;
+      redisNext.entryId = rebuiltRedisNext.entryId;
+    } else {
+      throw new ApiError(404, 'No customers are waiting.');
+    }
+  }
 
   try {
-    entry = await QueueEntry.findOneAndUpdate(
-      { queue: queueId, status: 'WAITING' },
-      { status: 'CALLED', calledAt: new Date(), calledBy: user.id },
-      { new: true, sort: { joinedAt: 1 } }
-    ).populate('customer', 'name email');
+    if (redisNext?.status === 'OK') {
+      entry = await QueueEntry.findOneAndUpdate(
+        { _id: redisNext.entryId, queue: queueId, status: 'WAITING' },
+        { status: 'CALLED', calledAt: new Date(), calledBy: user.id },
+        { new: true }
+      ).populate('customer', 'name email');
+
+      if (!entry) {
+        await redisQueueService.rebuildQueueFromMongoDB(queue);
+        throw new ApiError(409, 'Queue state changed. Please try calling the next customer again.');
+      }
+    } else {
+      const activeEntry = await QueueEntry.exists({
+        queue: queueId,
+        status: { $in: STAFF_ACTIVE_STATUSES },
+      });
+
+      if (activeEntry) {
+        throw new ApiError(409, 'Complete the current customer before calling the next customer.');
+      }
+
+      entry = await QueueEntry.findOneAndUpdate(
+        { queue: queueId, status: 'WAITING' },
+        { status: 'CALLED', calledAt: new Date(), calledBy: user.id },
+        { new: true, sort: { joinedAt: 1 } }
+      ).populate('customer', 'name email');
+    }
   } catch (error) {
     if (error.code === 11000) {
+      await redisQueueService.rebuildQueueFromMongoDB(queue);
       throw new ApiError(409, 'Complete the current customer before calling the next customer.');
     }
 
@@ -507,6 +553,7 @@ export const callNextCustomer = async (queueId, user) => {
     throw new ApiError(404, 'No customers are waiting.');
   }
 
+  await redisQueueService.markServing(entry);
   emitQueueEvent(QUEUE_SOCKET_EVENTS.CALLED, queueId, { entry: buildEntrySocketPayload(entry) });
   emitQueueUpdated(queueId, { entry: buildEntrySocketPayload(entry) });
 
@@ -535,6 +582,7 @@ export const markInService = async (entryId, user) => {
   entry.serviceStartedBy = user.id;
   await entry.save();
   const populatedEntry = await entry.populate('customer', 'name email');
+  await redisQueueService.markServing(populatedEntry);
   emitQueueEvent(QUEUE_SOCKET_EVENTS.SERVICE_STARTED, entry.queue, { entry: buildEntrySocketPayload(populatedEntry) });
   emitQueueUpdated(entry.queue, { entry: buildEntrySocketPayload(populatedEntry) });
   return populatedEntry;
@@ -553,6 +601,7 @@ export const completeService = async (entryId, user) => {
   entry.serviceTime = minutesBetween(entry.serviceStartedAt, completedAt);
   await entry.save();
   await Queue.findByIdAndUpdate(entry.queue, { $inc: { totalServed: 1 } });
+  await redisQueueService.markCompleted(entry.queue, entry.id);
 
   const populatedEntry = await entry.populate('customer', 'name email');
   emitQueueEvent(QUEUE_SOCKET_EVENTS.COMPLETED, entry.queue, { entry: buildEntrySocketPayload(populatedEntry) });
@@ -570,6 +619,7 @@ export const skipEntry = async (entryId, user) => {
   entry.skippedBy = user.id;
   entry.skipReason = 'Skipped by staff';
   await entry.save();
+  await redisQueueService.removeCustomer(entry.queue, entry.id);
 
   const populatedEntry = await entry.populate('customer', 'name email');
   emitQueueEvent(QUEUE_SOCKET_EVENTS.SKIPPED, entry.queue, { entry: buildEntrySocketPayload(populatedEntry) });
@@ -586,6 +636,7 @@ export const markNoShow = async (entryId, user) => {
   entry.noShowAt = new Date();
   entry.noShowBy = user.id;
   await entry.save();
+  await redisQueueService.removeCustomer(entry.queue, entry.id);
 
   const populatedEntry = await entry.populate('customer', 'name email');
   emitQueueEvent(QUEUE_SOCKET_EVENTS.NO_SHOW, entry.queue, { entry: buildEntrySocketPayload(populatedEntry) });
