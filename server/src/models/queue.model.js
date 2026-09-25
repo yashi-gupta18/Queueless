@@ -19,7 +19,7 @@ const queueSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: QUEUE_STATUSES,
-      default: 'OPEN',
+      default: 'CLOSED',
       index: true,
     },
     currentToken: {
@@ -32,11 +32,22 @@ const queueSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    openedAt: {
+      type: Date,
+      default: null,
+    },
+    closedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-queueSchema.index({ branch: 1, service: 1 }, { unique: true });
+queueSchema.index(
+  { branch: 1, service: 1, status: 1 },
+  { unique: true, partialFilterExpression: { status: 'OPEN' } }
+);
 queueSchema.index({ branch: 1, status: 1 });
 
 queueSchema.set('toJSON', {

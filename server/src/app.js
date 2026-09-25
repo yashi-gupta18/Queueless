@@ -10,8 +10,9 @@ import staffQueueRoutes from './modules/staffQueue/staffQueue.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware.js';
 
 const app = express();
+const corsOrigin = process.env.CLIENT_URL || 'http://127.0.0.1:5173';
 
-app.use(cors());
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 
 app.get('/api/health', (req, res) => {

@@ -11,6 +11,19 @@ export const queueIdSchema = z.object({
   }),
 });
 
+export const queueByIdSchema = z.object({
+  params: z.object({
+    id: objectId,
+  }),
+});
+
+export const createQueueSchema = z.object({
+  body: z.object({
+    branch: objectId,
+    service: objectId,
+  }),
+});
+
 export const listQueuesSchema = z.object({
   query: z.object({
     branch: objectId.optional(),

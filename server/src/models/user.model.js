@@ -26,6 +26,18 @@ const userSchema = new mongoose.Schema(
       enum: USER_ROLES,
       default: 'CUSTOMER',
     },
+    assignedBranch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+      index: true,
+    },
+    assignedService: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Service',
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );
